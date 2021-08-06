@@ -79,7 +79,7 @@ public class ElasticsearchSinkTask extends SinkTask {
     this.client = client != null ? client : new ElasticsearchClient(config, reporter);
 
     log.info("Started ElasticsearchSinkTask. Connecting to ES server version: {}",
-        getServerVersion());
+            getServerVersion());
   }
 
   @Override
@@ -94,7 +94,7 @@ public class ElasticsearchSinkTask extends SinkTask {
 
       logTrace("Writing {} to Elasticsearch.", record);
 
-      ensureIndexExists(createIndexName(record.topic()));
+      ensureIndexExists(createIndexName(record));
       checkMapping(record);
       tryWriteRecord(record);
     }
@@ -122,7 +122,7 @@ public class ElasticsearchSinkTask extends SinkTask {
   }
 
   private void checkMapping(SinkRecord record) {
-    String index = createIndexName(record.topic());
+    String index = createIndexName(record);
     if (!config.shouldIgnoreSchema(record.topic()) && !existingMappings.contains(index)) {
       if (!client.hasMapping(index)) {
         client.createMapping(index, record.valueSchema());
@@ -135,16 +135,16 @@ public class ElasticsearchSinkTask extends SinkTask {
   private String getServerVersion() {
     ConfigCallbackHandler configCallbackHandler = new ConfigCallbackHandler(config);
     RestHighLevelClient highLevelClient = new RestHighLevelClient(
-        RestClient
-            .builder(
-                config.connectionUrls()
-                    .stream()
-                    .map(HttpHost::create)
-                    .collect(Collectors.toList())
-                    .toArray(new HttpHost[config.connectionUrls().size()])
-            )
-            .setHttpClientConfigCallback(configCallbackHandler)
-            .setRequestConfigCallback(configCallbackHandler)
+            RestClient
+                    .builder(
+                            config.connectionUrls()
+                                    .stream()
+                                    .map(HttpHost::create)
+                                    .collect(Collectors.toList())
+                                    .toArray(new HttpHost[config.connectionUrls().size()])
+                    )
+                    .setHttpClientConfigCallback(configCallbackHandler)
+                    .setRequestConfigCallback(configCallbackHandler)
     );
     MainResponse response;
     String esVersionNumber = "Unknown";
@@ -176,8 +176,8 @@ public class ElasticsearchSinkTask extends SinkTask {
    * </ul>
    * (<a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-create-index.html#indices-create-api-path-params">ref</a>_.)
    */
-  private String convertTopicToIndexName(String topic) {
-    String index = topic.toLowerCase();
+  private String convertTopicToIndexName(SinkRecord record) {
+    String index = record.topic().toLowerCase();
     if (index.length() > 255) {
       index = index.substring(0, 255);
     }
@@ -188,11 +188,16 @@ public class ElasticsearchSinkTask extends SinkTask {
 
     if (index.equals(".") || index.equals("..")) {
       index = index.replace(".", "dot");
-      log.warn("Elasticsearch cannot have indices named {}. Index will be named {}.", topic, index);
+      log.warn("Elasticsearch cannot have indices named {}. Index will be named {}.", record.topic(), index);
     }
 
-    if (!topic.equals(index)) {
-      log.trace("Topic '{}' was translated to index '{}'.", topic, index);
+    if (!record.topic().equals(index)) {
+      log.trace("Topic '{}' was translated to index '{}'.", record.topic(), index);
+    }
+
+    if (config.appendDateFromField() != null) {
+      Long timestamp = converter.extract(record, config.appendDateFromField());
+      index += "-" + converter.getFormattedDate(timestamp);
     }
 
     return index;
@@ -207,16 +212,16 @@ public class ElasticsearchSinkTask extends SinkTask {
    * </ul>
    * (<a href="https://github.com/elastic/ecs/blob/master/rfcs/text/0009-data_stream-fields.md#restrictions-on-values">ref</a>_.)
    */
-  private String convertTopicToDataStreamName(String topic) {
-    topic = topic.toLowerCase();
+  private String convertTopicToDataStreamName(SinkRecord record) {
+    String topic = record.topic().toLowerCase();
     if (topic.length() > 100) {
       topic = topic.substring(0, 100);
     }
     String dataStream = String.format(
-        "%s-%s-%s",
-        config.dataStreamType().name().toLowerCase(),
-        config.dataStreamDataset(),
-        topic
+            "%s-%s-%s",
+            config.dataStreamType().name().toLowerCase(),
+            config.dataStreamDataset(),
+            topic
     );
     return dataStream;
   }
@@ -233,10 +238,10 @@ public class ElasticsearchSinkTask extends SinkTask {
    * </ul>
    * (<a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-create-index.html#indices-create-api-path-params">ref</a>_.)
    */
-  private String createIndexName(String topic) {
+  private String createIndexName(SinkRecord record) {
     return config.isDataStream()
-        ? convertTopicToDataStreamName(topic)
-        : convertTopicToIndexName(topic);
+            ? convertTopicToDataStreamName(record)
+            : convertTopicToIndexName(record);
   }
 
   private void ensureIndexExists(String index) {
@@ -266,7 +271,7 @@ public class ElasticsearchSinkTask extends SinkTask {
   private void tryWriteRecord(SinkRecord sinkRecord) {
     DocWriteRequest<?> record = null;
     try {
-      record = converter.convertRecord(sinkRecord, createIndexName(sinkRecord.topic()));
+      record = converter.convertRecord(sinkRecord, createIndexName(sinkRecord));
     } catch (DataException convertException) {
       reportBadRecord(sinkRecord, convertException);
 
@@ -285,10 +290,10 @@ public class ElasticsearchSinkTask extends SinkTask {
 
   private static String recordString(SinkRecord record) {
     return String.format(
-        "record from topic=%s partition=%s offset=%s",
-        record.topic(),
-        record.kafkaPartition(),
-        record.kafkaOffset()
+            "record from topic=%s partition=%s offset=%s",
+            record.topic(),
+            record.kafkaPartition(),
+            record.kafkaOffset()
     );
   }
 }

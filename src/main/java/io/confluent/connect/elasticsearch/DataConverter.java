@@ -20,6 +20,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.confluent.connect.elasticsearch.ElasticsearchSinkConnectorConfig.BehaviorOnNullValues;
+import io.confluent.connect.storage.util.DataUtils;
+import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.ConnectSchema;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
@@ -40,8 +42,11 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.VersionType;
+import org.joda.time.DateTime;
+import org.joda.time.format.DateTimeFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.util.regex.Pattern;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -60,6 +65,7 @@ public class DataConverter {
   protected static final String MAP_KEY = "key";
   protected static final String MAP_VALUE = "value";
   protected static final String TIMESTAMP_FIELD = "@timestamp";
+  private static final Pattern NUMERIC_TIMESTAMP_PATTERN = Pattern.compile("^-?[0-9]{1,19}$");
 
   private ObjectMapper objectMapper;
 
@@ -69,6 +75,7 @@ public class DataConverter {
   }
 
   private final ElasticsearchSinkConnectorConfig config;
+  private DateTimeFormatter dateTime;
 
   /**
    * Create a DataConverter, specifying how map entries with string keys within record
@@ -94,7 +101,7 @@ public class DataConverter {
       schemaType = ConnectSchema.schemaType(key.getClass());
       if (schemaType == null) {
         throw new DataException(
-            "Java class " + key.getClass() + " does not have corresponding schema type."
+                "Java class " + key.getClass() + " does not have corresponding schema type."
         );
       }
     } else {
@@ -129,8 +136,8 @@ public class DataConverter {
             // unique per message, we can be confident that there wouldn't be any corresponding
             // index present in ES to delete anyways.
             log.trace(
-                "Ignoring {} with null key, since the record key is used as the ID of the index",
-                recordString(record)
+                    "Ignoring {} with null key, since the record key is used as the ID of the index",
+                    recordString(record)
             );
             return null;
           }
@@ -140,15 +147,15 @@ public class DataConverter {
         case FAIL:
         default:
           throw new DataException(
-              String.format(
-                  "%s with key of %s and null value encountered (to ignore future records like"
-                      + " this change the configuration property '%s' from '%s' to '%s')",
-                  recordString(record),
-                  record.key(),
-                  ElasticsearchSinkConnectorConfig.BEHAVIOR_ON_NULL_VALUES_CONFIG,
-                  BehaviorOnNullValues.FAIL,
-                  BehaviorOnNullValues.IGNORE
-              )
+                  String.format(
+                          "%s with key of %s and null value encountered (to ignore future records like"
+                                  + " this change the configuration property '%s' from '%s' to '%s')",
+                          recordString(record),
+                          record.key(),
+                          ElasticsearchSinkConnectorConfig.BEHAVIOR_ON_NULL_VALUES_CONFIG,
+                          BehaviorOnNullValues.FAIL,
+                          BehaviorOnNullValues.IGNORE
+                  )
           );
       }
     }
@@ -157,8 +164,8 @@ public class DataConverter {
     payload = maybeAddTimestamp(payload, record.timestamp());
 
     final String id = config.shouldIgnoreKey(record.topic())
-        ? String.format("%s+%d+%d", record.topic(), record.kafkaPartition(), record.kafkaOffset())
-        : convertKey(record.keySchema(), record.key());
+            ? String.format("%s+%d+%d", record.topic(), record.kafkaPartition(), record.kafkaOffset())
+            : convertKey(record.keySchema(), record.key());
 
     // delete
     if (record.value() == null) {
@@ -169,14 +176,14 @@ public class DataConverter {
     switch (config.writeMethod()) {
       case UPSERT:
         return new UpdateRequest(index, id)
-            .doc(payload, XContentType.JSON)
-            .upsert(payload, XContentType.JSON)
-            .retryOnConflict(Math.min(config.maxInFlightRequests(), 5));
+                .doc(payload, XContentType.JSON)
+                .upsert(payload, XContentType.JSON)
+                .retryOnConflict(Math.min(config.maxInFlightRequests(), 5));
       case INSERT:
         OpType opType = config.isDataStream() ? OpType.CREATE : OpType.INDEX;
         return maybeAddExternalVersioning(
-            new IndexRequest(index).id(id).source(payload, XContentType.JSON).opType(opType),
-            record
+                new IndexRequest(index).id(id).source(payload, XContentType.JSON).opType(opType),
+                record
         );
       default:
         return null; // shouldn't happen
@@ -189,11 +196,11 @@ public class DataConverter {
     }
 
     Schema schema = config.shouldIgnoreSchema(record.topic())
-        ? record.valueSchema()
-        : preProcessSchema(record.valueSchema());
+            ? record.valueSchema()
+            : preProcessSchema(record.valueSchema());
     Object value = config.shouldIgnoreSchema(record.topic())
-        ? record.value()
-        : preProcessValue(record.value(), record.valueSchema(), schema);
+            ? record.value()
+            : preProcessValue(record.value(), record.valueSchema(), schema);
 
     byte[] rawJsonPayload = JSON_CONVERTER.fromConnectData(record.topic(), schema, value);
     return new String(rawJsonPayload, StandardCharsets.UTF_8);
@@ -223,12 +230,12 @@ public class DataConverter {
   }
 
   private DocWriteRequest<?> maybeAddExternalVersioning(
-      DocWriteRequest<?> request,
-      SinkRecord record
+          DocWriteRequest<?> request,
+          SinkRecord record
   ) {
     if (!config.isDataStream() && !config.shouldIgnoreKey(record.topic())) {
       request.versionType(VersionType.EXTERNAL);
-      request.version(record.kafkaOffset());
+      request.version(config.versionField() != null ? extract(record, config.versionField()) : record.timestamp());
     }
 
     return request;
@@ -290,9 +297,9 @@ public class DataConverter {
       return copySchemaBasics(schema, result).build();
     }
     Schema elementSchema = SchemaBuilder.struct().name(keyName + "-" + valueName)
-        .field(MAP_KEY, preprocessedKeySchema)
-        .field(MAP_VALUE, preprocessedValueSchema)
-        .build();
+            .field(MAP_KEY, preprocessedKeySchema)
+            .field(MAP_VALUE, preprocessedValueSchema)
+            .build();
     return copySchemaBasics(schema, SchemaBuilder.array(elementSchema)).build();
   }
 
@@ -391,8 +398,8 @@ public class DataConverter {
       Map<Object, Object> processedMap = new HashMap<>();
       for (Map.Entry<?, ?> entry: map.entrySet()) {
         processedMap.put(
-            preProcessValue(entry.getKey(), keySchema, newSchema.keySchema()),
-            preProcessValue(entry.getValue(), valueSchema, newValueSchema)
+                preProcessValue(entry.getKey(), keySchema, newSchema.keySchema()),
+                preProcessValue(entry.getValue(), valueSchema, newValueSchema)
         );
       }
       return processedMap;
@@ -422,10 +429,82 @@ public class DataConverter {
 
   private static String recordString(SinkRecord record) {
     return String.format(
-        "record from topic=%s partition=%s offset=%s",
-        record.topic(),
-        record.kafkaPartition(),
-        record.kafkaOffset()
+            "record from topic=%s partition=%s offset=%s",
+            record.topic(),
+            record.kafkaPartition(),
+            record.kafkaOffset()
     );
+  }
+
+  public Long extract(ConnectRecord<?> record, String fieldName) {
+    Object value = record.value();
+    if (value instanceof Struct) {
+      Struct struct = (Struct) value;
+      if(struct.get(fieldName) == null){
+        return Long.valueOf(1);
+      }
+      Object timestampValue = DataUtils.getNestedFieldValue(struct, fieldName);
+      Schema fieldSchema = DataUtils.getNestedField(record.valueSchema(), fieldName).schema();
+
+      if (Timestamp.LOGICAL_NAME.equals(fieldSchema.name())) {
+        return ((java.util.Date) timestampValue).getTime();
+      }
+
+      switch (fieldSchema.type()) {
+        case INT32:
+        case INT64:
+          return ((Number) timestampValue).longValue();
+        case STRING:
+          return extractTimestampFromString((String) timestampValue);
+        default:
+          log.error(
+                  "Unsupported type '{}' for user-defined timestamp field.",
+                  fieldSchema.type().getName()
+          );
+          throw new DataException(
+                  "Error extracting timestamp from record field: " + fieldName
+          );
+      }
+    } else if (value instanceof Map) {
+      Map<?, ?> map = (Map<?, ?>) value;
+      if(map.get(fieldName) == null){
+        return Long.valueOf(1);
+      }
+      Object timestampValue = DataUtils.getNestedFieldValue(map, fieldName);
+      if (timestampValue instanceof Number) {
+        return ((Number) timestampValue).longValue();
+      } else if (timestampValue instanceof String) {
+        return extractTimestampFromString((String) timestampValue);
+      } else if (timestampValue instanceof java.util.Date) {
+        return ((java.util.Date) timestampValue).getTime();
+      } else {
+        log.error(
+                "Unsupported type '{}' for user-defined timestamp field.",
+                timestampValue.getClass()
+        );
+        throw new DataException(
+                "Error extracting timestamp from record field: " + fieldName
+        );
+      }
+    } else {
+      log.error("Value is not of Struct or Map type.");
+      throw new DataException("Error encoding partition.");
+    }
+  }
+
+  private Long extractTimestampFromString(String timestampValue) {
+    if (NUMERIC_TIMESTAMP_PATTERN.matcher(timestampValue).matches()) {
+      try {
+        return Long.valueOf(timestampValue);
+      } catch (NumberFormatException e) {
+        // expected, ignore
+      }
+    }
+    return dateTime.parseMillis(timestampValue);
+  }
+
+  public String getFormattedDate(Long timestamp){
+    final DateTime dt = new DateTime(timestamp);
+    return dt.toString("dd-MM-yyyy");
   }
 }
